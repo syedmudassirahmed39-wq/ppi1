@@ -2,3 +2,5 @@ torch
 torch-geometric
 flask
 numpy
+pandas
+
