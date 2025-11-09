@@ -1,6 +1,7 @@
 torch
 torch-geometric
 flask
+uvicorn
 numpy
 pandas
 networkx
