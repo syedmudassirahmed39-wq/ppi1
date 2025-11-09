@@ -2,7 +2,3 @@ torch
 torch-geometric
 flask
 numpy
-pandas
-networkx
-matplotlib
-scikit-learn
