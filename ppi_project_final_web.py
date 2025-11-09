@@ -1,5 +1,4 @@
 import os
-import pickle
 import random
 import time
 import numpy as np
@@ -13,68 +12,38 @@ import networkx as nx
 from flask import Flask, request, jsonify, render_template_string
 
 # ----------------- CONFIG -----------------
-BASE = r"C:\pp_project"
-INFO_PATH = os.path.join(BASE, "protein.info.v12.0.txt")
-LINKS_PATH = os.path.join(BASE, "9606.protein.links.v12.0.txt")
-CACHE_PATH = os.path.join(BASE, "ppi_cache_final.pkl")
+BASE = os.getcwd()
 CSV_OUTPUT = os.path.join(BASE, "ppi_node_predictions.csv")
 MODEL_PATH = os.path.join(BASE, "ppi_trained_model.pth")
 
 MAX_NODES = 3000
 FEATURE_DIM = 32
-NUM_EPOCHS = 150
+NUM_EPOCHS = 100
 SEED = 42
 
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# ----------------- LOAD / CACHE -----------------
-def build_and_cache():
-    protein_info = pd.read_csv(INFO_PATH, sep="\t")
-    ppi_links = pd.read_csv(LINKS_PATH, sep=" ")
-    with open(CACHE_PATH, "wb") as f:
-        pickle.dump((protein_info, ppi_links), f)
-    return protein_info, ppi_links
+# ----------------- SYNTHETIC DEMO DATA -----------------
+print("⚗️ Using synthetic demo PPI data for Render deployment...")
 
-if os.path.exists(CACHE_PATH):
-    with open(CACHE_PATH, "rb") as f:
-        protein_info, ppi_links = pickle.load(f)
-    print("✅ Loaded dataset from cache.")
-else:
-    protein_info, ppi_links = build_and_cache()
-    print("✅ Dataset built and cached for faster loading.")
+protein_info = pd.DataFrame({
+    "string_protein_id": [f"protein_{i}" for i in range(1, MAX_NODES + 1)],
+    "preferred_name": [f"Protein_{i}" for i in range(1, MAX_NODES + 1)]
+})
 
-protein_info.columns = [c.strip().lstrip("#") for c in protein_info.columns]
-
-# ----------------- PREPARE GRAPH -----------------
-ppi_links = ppi_links.merge(
-    protein_info[['string_protein_id', 'preferred_name']],
-    left_on='protein1', right_on='string_protein_id', how='left'
-).rename(columns={'preferred_name': 'protein1_name'}).drop(columns=['string_protein_id'])
-
-ppi_links = ppi_links.merge(
-    protein_info[['string_protein_id', 'preferred_name']],
-    left_on='protein2', right_on='string_protein_id', how='left'
-).rename(columns={'preferred_name': 'protein2_name'}).drop(columns=['string_protein_id'])
+ppi_links = pd.DataFrame({
+    "protein1": np.random.choice(protein_info["string_protein_id"], 8000),
+    "protein2": np.random.choice(protein_info["string_protein_id"], 8000)
+})
 
 all_proteins = pd.unique(ppi_links[['protein1', 'protein2']].values.ravel())
-
-if len(all_proteins) > MAX_NODES:
-    sampled_nodes = np.random.choice(all_proteins, MAX_NODES, replace=False)
-    sub_links = ppi_links[ppi_links['protein1'].isin(sampled_nodes) & ppi_links['protein2'].isin(sampled_nodes)].copy()
-    proteins = np.array(sorted(pd.concat([sub_links['protein1'], sub_links['protein2']]).unique()))
-    print(f"🔹 Subsampled {len(proteins)} nodes. Edges kept: {len(sub_links)}")
-else:
-    sub_links = ppi_links.copy()
-    proteins = np.array(sorted(all_proteins))
-    print(f"🔹 Using full graph with {len(proteins)} nodes and {len(sub_links)} edges")
+proteins = np.array(sorted(all_proteins))
 
 protein_to_id = {p: i for i, p in enumerate(proteins)}
-sub_links = sub_links[sub_links['protein1'].isin(protein_to_id) & sub_links['protein2'].isin(protein_to_id)].copy()
-
-u = sub_links['protein1'].map(protein_to_id).to_numpy(dtype=np.int64)
-v = sub_links['protein2'].map(protein_to_id).to_numpy(dtype=np.int64)
+u = ppi_links['protein1'].map(protein_to_id).to_numpy(dtype=np.int64)
+v = ppi_links['protein2'].map(protein_to_id).to_numpy(dtype=np.int64)
 edge_index = torch.tensor(np.vstack([u, v]), dtype=torch.long)
 
 # ----------------- FEATURES & LABELS -----------------
@@ -88,9 +57,8 @@ num_nodes = data.num_nodes
 indices = np.arange(num_nodes)
 np.random.shuffle(indices)
 split = int(0.85 * num_nodes)
-train_idx_np, test_idx_np = indices[:split], indices[split:]
-train_idx = torch.from_numpy(train_idx_np).long()
-test_idx = torch.from_numpy(test_idx_np).long()
+train_idx = torch.from_numpy(indices[:split]).long()
+test_idx = torch.from_numpy(indices[split:]).long()
 
 # ----------------- MODEL -----------------
 class HighAccuracyGNN(torch.nn.Module):
@@ -118,16 +86,14 @@ class HighAccuracyGNN(torch.nn.Module):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = HighAccuracyGNN(FEATURE_DIM, 256, 2).to(device)
-data = data.to(device)
-train_idx = train_idx.to(device)
-test_idx = test_idx.to(device)
+data, train_idx, test_idx = data.to(device), train_idx.to(device), test_idx.to(device)
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.0015, weight_decay=1e-6)
 criterion = torch.nn.CrossEntropyLoss()
 
 # ----------------- TRAINING -----------------
 print("\n🚀 Training started...\n")
-best_acc = 0.0
-start_time = time.time()
+best_acc, start_time = 0.0, time.time()
 
 for epoch in range(1, NUM_EPOCHS + 1):
     model.train()
@@ -138,20 +104,18 @@ for epoch in range(1, NUM_EPOCHS + 1):
     optimizer.step()
 
     preds = out.argmax(dim=1)
-    train_acc = accuracy_score(data.y[train_idx].cpu().numpy(), preds[train_idx].cpu().numpy()) * 100
-    test_acc = accuracy_score(data.y[test_idx].cpu().numpy(), preds[test_idx].cpu().numpy()) * 100
+    train_acc = accuracy_score(data.y[train_idx].cpu(), preds[train_idx].cpu()) * 100
+    test_acc = accuracy_score(data.y[test_idx].cpu(), preds[test_idx].cpu()) * 100
     best_acc = max(best_acc, test_acc)
-
     print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Train: {train_acc:.2f}% | Test: {test_acc:.2f}% | Best: {best_acc:.2f}%")
 
-total_time = time.time() - start_time
 print(f"\n✅ Final Training Accuracy: {train_acc:.2f}%")
-print(f"✅ Final Prediction Accuracy: {test_acc:.2f}%")
-print(f"🏆 Best Prediction Accuracy: {best_acc:.2f}%")
-print(f"⏱ Training Time: {total_time:.2f}s")
+print(f"✅ Final Test Accuracy: {test_acc:.2f}%")
+print(f"🏆 Best Test Accuracy: {best_acc:.2f}%")
+print(f"⏱ Total Time: {time.time() - start_time:.2f}s")
 
 torch.save(model.state_dict(), MODEL_PATH)
-print(f"💾 Trained model saved at: {MODEL_PATH}")
+print(f"💾 Model saved at: {MODEL_PATH}")
 
 # ----------------- SAVE PREDICTIONS -----------------
 model.eval()
@@ -159,60 +123,57 @@ with torch.no_grad():
     out = model(data.x, data.edge_index)
     preds = out.argmax(dim=1).cpu().numpy()
 
-results_df = pd.DataFrame({
+pd.DataFrame({
     "protein_id": proteins,
     "predicted_class": preds,
     "class_description": ["Class 0" if p == 0 else "Class 1" for p in preds]
-})
-results_df.to_csv(CSV_OUTPUT, index=False)
-print(f"✅ Predictions saved to: {CSV_OUTPUT}")
+}).to_csv(CSV_OUTPUT, index=False)
+print(f"✅ Predictions saved to {CSV_OUTPUT}")
 
 # ----------------- VISUALIZATION -----------------
 G = nx.Graph()
 edges = edge_index.cpu().numpy().T
 G.add_edges_from(edges)
 G.add_nodes_from(range(len(proteins)))
-colors = ["#1f77b4" if preds[i] == 0 else "#ff7f0e" for i in range(len(G.nodes))]
-
+colors = ["#1f77b4" if p == 0 else "#ff7f0e" for p in preds]
 plt.figure(figsize=(10, 8))
 pos = nx.spring_layout(G, seed=SEED)
-nx.draw(G, pos, node_color=colors, node_size=35, edge_color='gray', with_labels=False)
-plt.title("Protein–Protein Interaction Network (Predicted Classes)", fontsize=13)
+nx.draw(G, pos, node_color=colors, node_size=30, edge_color="gray", with_labels=False)
+plt.title("Protein–Protein Interaction Network (Predicted Classes)")
 plt.tight_layout()
 plt.savefig(os.path.join(BASE, "ppi_network_visualization.png"))
-plt.show()
+plt.close()
 print("✅ Visualization saved as ppi_network_visualization.png")
 
 # ----------------- FLASK WEB + API -----------------
 app = Flask(__name__)
 
-# Frontend HTML
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>🧬 Protein Interaction Predictor</title>
-    <style>
-        body { font-family: Arial; background-color: #f4f8fb; text-align: center; padding-top: 40px; }
-        input { width: 220px; padding: 8px; margin: 5px; border-radius: 8px; border: 1px solid #ccc; }
-        button { padding: 10px 20px; border: none; background-color: #007BFF; color: white; border-radius: 8px; cursor: pointer; }
-        button:hover { background-color: #0056b3; }
-        .box { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 0 10px #ccc; width: 50%; margin: auto; }
-    </style>
+<title>🧬 Protein Interaction Predictor</title>
+<style>
+body {font-family: Arial; background:#f4f8fb; text-align:center; padding-top:40px;}
+input{width:220px;padding:8px;margin:5px;border-radius:8px;border:1px solid #ccc;}
+button{padding:10px 20px;border:none;background:#007BFF;color:white;border-radius:8px;cursor:pointer;}
+button:hover{background:#0056b3;}
+.box{background:white;padding:25px;border-radius:12px;box-shadow:0 0 10px #ccc;width:50%;margin:auto;}
+</style>
 </head>
 <body>
-    <div class="box">
-        <h2>🧬 Protein–Protein Interaction Prediction</h2>
-        <form method="POST" action="/predict_form">
-            {% for i in range(8) %}
-                <input type="number" step="any" name="f{{i}}" placeholder="Feature {{i+1}}" required><br>
-            {% endfor %}
-            <br><button type="submit">Predict Interaction</button>
-        </form>
-        {% if result %}
-            <h3>Prediction: {{ result }}</h3>
-        {% endif %}
-    </div>
+<div class="box">
+<h2>🧬 Protein–Protein Interaction Prediction</h2>
+<form method="POST" action="/predict_form">
+{% for i in range(8) %}
+<input type="number" step="any" name="f{{i}}" placeholder="Feature {{i+1}}" required><br>
+{% endfor %}
+<br><button type="submit">Predict Interaction</button>
+</form>
+{% if result %}
+<h3>Prediction: {{ result }}</h3>
+{% endif %}
+</div>
 </body>
 </html>
 """
@@ -241,7 +202,7 @@ def predict_form():
 def predict_api():
     data_json = request.json.get("features", [])
     if not data_json or len(data_json) != FEATURE_DIM:
-        return jsonify({"error": f"Please provide a valid list of {FEATURE_DIM} features"}), 400
+        return jsonify({"error": f"Provide a valid list of {FEATURE_DIM} features"}), 400
     x_input = torch.tensor(data_json).float().unsqueeze(0)
     edge_dummy = torch.tensor([[0], [0]])
     with torch.no_grad():
@@ -253,4 +214,5 @@ def predict_api():
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
