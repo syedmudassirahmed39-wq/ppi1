@@ -16,9 +16,9 @@ BASE = os.getcwd()
 CSV_OUTPUT = os.path.join(BASE, "ppi_node_predictions.csv")
 MODEL_PATH = os.path.join(BASE, "ppi_trained_model.pth")
 
-MAX_NODES = 3000
+MAX_NODES = 800
 FEATURE_DIM = 32
-NUM_EPOCHS = 100
+NUM_EPOCHS = 30
 SEED = 42
 
 random.seed(SEED)
@@ -131,6 +131,7 @@ pd.DataFrame({
 print(f"✅ Predictions saved to {CSV_OUTPUT}")
 
 # ----------------- VISUALIZATION -----------------
+"""
 G = nx.Graph()
 edges = edge_index.cpu().numpy().T
 G.add_edges_from(edges)
@@ -144,6 +145,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(BASE, "ppi_network_visualization.png"))
 plt.close()
 print("✅ Visualization saved as ppi_network_visualization.png")
+"""
 
 # ----------------- FLASK WEB + API -----------------
 app = Flask(__name__)
