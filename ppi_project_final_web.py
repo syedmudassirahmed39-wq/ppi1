@@ -6,44 +6,59 @@ import numpy as np
 import torch
 from torch_geometric.nn import SAGEConv, GraphNorm
 from flask import Flask, request, render_template_string
-import threading, webbrowser
+import threading, webbrowser, socket
 
 # ---------------- CONFIG ----------------
 BASE = os.getcwd()
 CACHE_PATH = os.path.join(BASE, "ppi_cache.pkl")
+INFO_PATH = os.path.join(BASE, "protein.info.v12.0.txt")
+LINKS_PATH = os.path.join(BASE, "9606.protein.links.v12.0.txt")
 
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# ---------------- AUTO-GENERATE LIGHTWEIGHT DATA ----------------
-print("📥 Loading lightweight synthetic PPI dataset (Render-safe)...")
+# ---------------- LOAD / CACHE DATA ----------------
+print("📥 Loading STRING PPI dataset (cached or fresh)...")
 
 if os.path.exists(CACHE_PATH):
     with open(CACHE_PATH, "rb") as f:
         protein_info, ppi_links = pickle.load(f)
+    print("✅ Loaded from cache (ppi_cache.pkl).")
     dataset_status = "✅ Dataset loaded from cache."
 else:
-    print("⚗️ Generating synthetic lightweight dataset...")
-    protein_info = pd.DataFrame({
-        "string_protein_id": [f"protein_{i}" for i in range(1, 801)],
-        "preferred_name": [f"PROT{i}" for i in range(1, 801)]
-    })
-    ppi_links = pd.DataFrame({
-        "protein1": [f"protein_{random.randint(1,800)}" for _ in range(4000)],
-        "protein2": [f"protein_{random.randint(1,800)}" for _ in range(4000)]
-    })
-    with open(CACHE_PATH, "wb") as f:
-        pickle.dump((protein_info, ppi_links), f)
-    dataset_status = "💾 Generated synthetic dataset and cached it."
+    if os.path.exists(INFO_PATH) and os.path.exists(LINKS_PATH):
+        protein_info = pd.read_csv(INFO_PATH, sep="\t")
+        ppi_links = pd.read_csv(LINKS_PATH, sep=" ")
+        with open(CACHE_PATH, "wb") as f:
+            pickle.dump((protein_info, ppi_links), f)
+        print("✅ Built dataset and saved cache.")
+        dataset_status = "💾 Dataset built and cached successfully."
+    else:
+        print("⚠️ Dataset files not found! Generating lightweight synthetic dataset...")
+        protein_info = pd.DataFrame({
+            "string_protein_id": [f"protein_{i}" for i in range(1, 801)],
+            "preferred_name": [f"PROT{i}" for i in range(1, 801)]
+        })
+        ppi_links = pd.DataFrame({
+            "protein1": [f"protein_{random.randint(1,800)}" for _ in range(4000)],
+            "protein2": [f"protein_{random.randint(1,800)}" for _ in range(4000)]
+        })
+        with open(CACHE_PATH, "wb") as f:
+            pickle.dump((protein_info, ppi_links), f)
+        dataset_status = "💾 Synthetic dataset generated and cached."
+
+# Limit for speed
+protein_info = protein_info.head(800)
+ppi_links = ppi_links.head(4000)
 
 protein_ids = protein_info["string_protein_id"].tolist()
 protein_names = protein_info["preferred_name"].tolist()
 protein_mapping = dict(zip(protein_ids, protein_names))
 ppi_pairs = set(tuple(sorted((r["protein1"], r["protein2"]))) for _, r in ppi_links.iterrows())
 
-print(f"✅ Loaded {len(protein_mapping)} proteins and {len(ppi_links)} edges.")
+print(f"✅ Loaded {len(protein_mapping)} proteins and {len(ppi_links)} interactions.")
 
 # ---------------- BIOLOGICAL INFO ----------------
 bio_info = {
@@ -171,10 +186,23 @@ def predict_pair():
     except Exception as e:
         return f"Error: {str(e)}"
 
-def open_browser():
-    webbrowser.open_new("http://127.0.0.1:5000")
+# ---------------- AUTO OPEN BROWSER ----------------
+def open_browser(host, port):
+    try:
+        url = f"http://{host}:{port}"
+        print(f"🌐 Opening web interface at: {url}")
+        webbrowser.open_new_tab(url)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
-    if not os.environ.get("RENDER"):
-        threading.Timer(1.0, open_browser).start()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    host = "localhost"
+    port = 5000
+
+    # check if port available
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if s.connect_ex((host, port)) == 0:
+            port += 1
+
+    threading.Timer(1.5, lambda: open_browser(host, port)).start()
+    app.run(host=host, port=port, debug=False)
